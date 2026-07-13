@@ -1,0 +1,14 @@
+{
+  "server": {
+    "host": "your-server-ip",
+    "port": 22,
+    "username": "root",
+    "auth_type": "key",
+    "ssh_key_path": "~/.ssh/id_ed25519",
+    "remote_addons_dir": "/home/your-user/l4d2-server/left4dead2/addons"
+  },
+  "local": {
+    "local_addons_dir": "E:\\SteamLibrary\\steamapps\\common\\Left 4 Dead 2\\left4dead2\\addons"
+  },
+  "deploy_mode": "both"
+}
