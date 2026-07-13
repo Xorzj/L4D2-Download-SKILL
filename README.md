@@ -16,7 +16,7 @@
 ```bash
 mkdir -p ~/.claude/skills
 cd ~/.claude/skills
-git clone https://github.com/YOUR_USER/l4d2-map-deployer.git
+git clone https://github.com/Xorzj/L4D2-Download-SKILL.git
 ```
 
 首次运行时，按提示配置服务器连接信息和本地 addons 路径，或手动复制模板：
