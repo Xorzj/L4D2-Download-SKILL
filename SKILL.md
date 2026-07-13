@@ -1,6 +1,6 @@
 ---
 name: l4d2-map-deployer
-description: 根据用户输入的地图名，自动初始化并配置环境，从 Steam 抓取列表让用户选择。通过 Steam Web API + CDN 直链匿名下载 vpk，自动检测必需物品依赖，并部署到本地和远端服务器。
+description: 根据用户输入的地图名，自动初始化并配置环境，从 Steam 抓取列表让用户选择。通过 Steam Web API + CDN 直链匿名下载 vpk（双端模式下优先在服务器端下载再拉回本地），自动检测必需物品依赖，并部署到本地和远端服务器。
 allowed-tools:
   - Bash
   - Read
@@ -18,22 +18,7 @@ allowed-tools:
 cd ~/.claude/skills/l4d2-map-deployer
 ```
 
-所有后续操作均在此目录下执行。uv 管理 Python 依赖（`pyproject.toml` 已含 `paramiko`），统一使用 `uv run python`。
-
----
-
-## 前置检查: uv 环境
-
-使用 Bash 检查 `uv --version`。
-
-- **已安装** — 使用 Bash 执行 `uv sync` 确保依赖就位，然后继续 Step 0。
-- **未安装** — 使用 Bash 自动安装：
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-安装后执行 `export PATH="$HOME/.local/bin:$PATH"`，再执行 `uv sync`，然后继续 Step 0。
+所有后续操作均在此目录下执行。全部脚本只用 Python 标准库，直接用 `python3` 运行。无 uv、无 Docker、无 steamcmd。
 
 ---
 
@@ -112,7 +97,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Step 1: Steam 工坊检索
 
-使用 Bash 执行 `uv run python fetch_list.py "<用户输入的地图名>"`。
+使用 Bash 执行 `python3 fetch_list.py "<用户输入的地图名>"`。
 
 记录终端输出的全部结果（序号、ID、标题、描述、订阅数、大小、更新日期），供 Step 2 使用。
 
@@ -139,7 +124,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Step 2.5: 依赖检查
 
-使用 Bash 执行 `uv run python check_deps.py <目标ID>`。
+使用 Bash 执行 `python3 check_deps.py <目标ID>`。
 
 - **无依赖** — 直接进入 Step 3，`<下载列表>` = `<目标ID>`
 - **有依赖** — 向用户输出依赖清单，自动将主地图 + 所有依赖合并为 `<下载列表>`（ID 以逗号分隔），无需再次确认
@@ -148,15 +133,44 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Step 3: CDN 直链下载
 
-无需 Docker/steamcmd。通过 Steam Web API 匿名获取 CDN 下载链接，直接从 Steam 服务器拉取 vpk 文件。
+通过 Steam Web API 匿名获取 CDN 下载链接。`download.py` 只用 Python 标准库。
 
-使用 Bash 执行：
+**首先检查 `l4d2_config.json` 的 `deploy_mode`：**
+
+### 模式 A: `"both"` — 服务器端下载 → 拉回本地（默认）
+
+利用服务器带宽直连 Steam CDN，避免本地网络瓶颈。
+
+**3a.** 上传下载脚本到服务器：
 
 ```bash
-uv run python download.py "<ID1,ID2,...>"
+scp -P <port> -i <ssh_key> download.py <user>@<host>:/tmp/download_map.py
 ```
 
-脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `l4d2_temp_dl/vpk/` → .bin 改 .vpk，预览图保留原名。
+**3b.** 在服务器上执行下载（注意超时需覆盖大文件）：
+
+```bash
+ssh -p <port> -i <ssh_key> <user>@<host> "cd /tmp && python3 download_map.py <ID1,ID2,...>" 2>&1
+```
+
+timeout 至少 600000ms。脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `/tmp/l4d2_temp_dl/vpk/` → .bin 改 .vpk。
+
+**3c.** 拉回 vpk 到本地：
+
+```bash
+mkdir -p l4d2_temp_dl/vpk
+scp -P <port> -i <ssh_key> <user>@<host>:/tmp/l4d2_temp_dl/vpk/*.vpk l4d2_temp_dl/vpk/
+```
+
+### 模式 B: `"local_only"` — 本地下载
+
+无服务器时使用，直接在本地拉取 Steam CDN：
+
+```bash
+python3 download.py "<ID1,ID2,...>"
+```
+
+下载到 `l4d2_temp_dl/vpk/` → .bin 改 .vpk，预览图保留原名。
 
 ---
 
@@ -174,36 +188,80 @@ ls -lh l4d2_temp_dl/vpk/
 
 使用 Read 读取 `l4d2_config.json` 中的 `deploy_mode` 字段：
 
-- **`"local_only"`** — 跳过询问，直接设置参数 `--local-only`
-- **`"both"`** — 跳过询问，直接设置参数为空（双端部署）
+- **`"local_only"`** — 跳过询问，只部署本地
+- **`"both"`** — 跳过询问，双端部署
 - **`"ask"`**（或字段不存在）— 使用 AskUserQuestion 弹窗询问：
   - question: 「请选择部署范围」
   - header: 「部署范围」
   - options: `{label:"双端部署"}`, `{label:"仅本地"}`
 
-根据选择或配置确定最终参数，传递给 Step 5。
-
 ---
 
 ## Step 5: 部署执行
 
-使用 Bash 执行：
+不使用 deploy.py，直接用 shell 命令完成。先从配置读取 SSH 参数和路径。
+
+### 5a. 读取配置变量
+
+用 python3 一行内联读取配置，供后续 shell 命令使用。`local_addons_dir` 需做 Windows → WSL 路径转换（`E:\foo\bar` → `/mnt/e/foo/bar`）：
 
 ```bash
-uv run python deploy.py <参数>
+# 读取本地路径（自动转换 Windows 盘符）
+LOCAL_DIR=$(python3 -c "
+import json, re
+cfg = json.load(open('l4d2_config.json'))
+p = cfg['local']['local_addons_dir']
+m = re.match(r'^([A-Za-z]):(.*)', p)
+print(f'/mnt/{m.group(1).lower()}{m.group(2).replace(chr(92),chr(47))}' if m else p)
+")
 ```
 
-参数映射：双端部署（无参数）/ 仅本地（`--local-only`）
+若双端部署，同时读取远端参数：
+
+```bash
+SRV_HOST=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['host'])")
+SRV_PORT=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('port',22))")
+SRV_USER=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('username','root'))")
+SRV_KEY=$(python3 -c "import json,os; print(os.path.expanduser(json.load(open('l4d2_config.json'))['server'].get('ssh_key_path','~/.ssh/id_ed25519')))")
+REMOTE_DIR=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['remote_addons_dir'])")
+```
+
+> 若 `REMOTE_DIR` 为 `"auto"`，需要先用 `ssh ... "find / -type d -path '*/left4dead2/addons' 2>/dev/null | head -n 1"` 自动探测。
+
+### 5b. 本地部署
+
+```bash
+cp l4d2_temp_dl/vpk/*.vpk "$LOCAL_DIR"/
+echo "[本地] vpk → $LOCAL_DIR"
+```
+
+### 5c. 远端部署（仅双端模式）
+
+vpk 已在服务器 `/tmp/l4d2_temp_dl/vpk/`，直接 cp 到 addons 目录：
+
+```bash
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cp /tmp/l4d2_temp_dl/vpk/*.vpk $REMOTE_DIR/"
+echo "[远端] vpk → $REMOTE_DIR"
+```
+
+重启 L4D2 服务：
+
+```bash
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "tmux send-keys -t l4d2 C-c && sleep 1 && tmux send-keys -t l4d2 './start.sh' Enter"
+echo "[远端] 已重启 l4d2 服务"
+```
 
 ---
 
 ## Step 6: 收尾清理
 
-使用 Bash 删除临时目录：
+使用 Bash 删除本地临时目录和服务器端残留文件：
 
 ```bash
-rm -rf l4d2_temp_dl
+rm -rf l4d2_temp_dl && ssh -p <port> -i <ssh_key> <user>@<host> "rm -rf /tmp/l4d2_temp_dl /tmp/download_map.py"
 ```
+
+> 若 `local_only` 模式，只清理 `rm -rf l4d2_temp_dl`。
 
 输出摘要：
 
@@ -220,9 +278,10 @@ rm -rf l4d2_temp_dl
 
 ## 异常处理
 
-- 前置检查 uv 安装失败 → 提示手动安装：`curl -LsSf https://astral.sh/uv/install.sh | sh`，终止
 - Step 1 Steam 不可达 → 提示检查网络/代理，终止
-- Step 3 下载失败 → 提示检查网络，CDN 可能限制并发，逐个重试，终止
+- Step 3 服务器下载失败 → 提示检查服务器网络/Steam CDN 连通性，终止
+- Step 3 SCP 拉回失败 → 提示检查 SSH 连接，终止
+- Step 3 本地下载失败 → 提示检查网络，CDN 可能限制并发，逐个重试，终止
 - Step 4 无 vpk → 提示下载异常，保留 `l4d2_temp_dl` 供排查，终止
 - Step 5 SSH 失败 → 提示检查 IP/端口/防火墙/凭据，终止
 - Step 5 auto 搜索失败 → 提示手动填写 `remote_addons_dir`，终止
