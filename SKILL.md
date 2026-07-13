@@ -45,9 +45,11 @@ cd ~/.claude/skills/l4d2-map-deployer
 
 - header: 「本地addons路径」
 - question: 「请输入 Windows 端 left4dead2/addons 的绝对路径」
-- options: 提供一个默认路径和一个自定义选项，用户通过 Other 输入实际路径
+- options:
+  - `{label: "默认路径 (推荐)", description: "E:\\SteamLibrary\\steamapps\\common\\Left 4 Dead 2\\left4dead2\\addons"}`
+  - `{label: "自定义路径", description: "手动输入其他路径"}`
 
-收集后，使用 Write 写入 `l4d2_config.json`：
+收集后，使用 Write 写入 `l4d2_config.json`。**注意：需用 json.dumps 序列化以确保反斜杠正确转义**，格式如下：
 
 ```json
 {
@@ -61,6 +63,7 @@ cd ~/.claude/skills/l4d2-map-deployer
 第一批（服务器连接）：
 
 - header: 「远端IP」 question: 「请输入远端服务器 IP 地址」
+- header: 「SSH端口」 question: 「请输入 SSH 端口（默认 22，直接回车跳过）」
 - header: 「用户名」 question: 「请输入 SSH 用户名（默认 root）」
 - header: 「SSH密钥路径」 question: 「请输入 SSH 私钥绝对路径（留空则使用默认 ~/.ssh/id_ed25519）」
 
@@ -69,13 +72,20 @@ cd ~/.claude/skills/l4d2-map-deployer
 - header: 「远端addons」 question: 「请输入远端 left4dead2/addons 路径（不确定填 auto）」
 - header: 「本地addons」 question: 「请输入 Windows 端 left4dead2/addons 绝对路径」
 
-收集后，使用 Write 写入 `l4d2_config.json`：
+收集后，**对空值做默认处理**：
+- username 为空 → 用 `"root"`
+- ssh_key_path 为空 → 用 `"~/.ssh/id_ed25519"`
+- port 为空 → 用 `22`
+- remote_addons_dir 为空 → 用 `"auto"`
+
+使用 Write 写入 `l4d2_config.json`（**必须用 json.dumps 序列化**）：
 
 ```json
 {
   "server": {
     "host": "<IP>",
-    "username": "<用户名，默认 root>",
+    "port": <端口>,
+    "username": "<用户名>",
     "auth_type": "key",
     "ssh_key_path": "<SSH 私钥路径>",
     "remote_addons_dir": "<路径或 auto>"
@@ -116,9 +126,13 @@ cd ~/.claude/skills/l4d2-map-deployer
 ...
 ```
 
-输出完毕后，再使用 AskUserQuestion 弹出选择器。options 不足 4 个时用占位补齐，超过 4 个时优先取前 4 条放入 options，其余在 question 正文中列出。
+输出完毕后，再使用 AskUserQuestion 弹出选择器。options 不足 4 个时，仅展示实际结果数量（不要含无意义的占位选项）；超过 4 个时优先取前 4 条放入 options，其余在 question 正文中列出。
 
-解析用户回答得到 `<目标ID>`：1-5 取对应索引；纯数字直接使用。
+解析用户回答得到 `<目标ID>`：
+- 用户选了 `[N] 标题` → 取第 N 项的 ID
+- 用户选了纯数字 → 直接作为 ID 使用
+- 用户选了 Other 输入 → 取输入的第 N 项或纯数字 ID，同上规则
+- 索引越界 → 提示「无效选择」，重新使用 AskUserQuestion 询问
 
 ---
 
@@ -135,31 +149,44 @@ cd ~/.claude/skills/l4d2-map-deployer
 
 通过 Steam Web API 匿名获取 CDN 下载链接。`download.py` 只用 Python 标准库。
 
-**首先检查 `l4d2_config.json` 的 `deploy_mode`：**
+**首先使用 Read 检查 `l4d2_config.json` 的 `deploy_mode`，然后按模式分流：**
 
 ### 模式 A: `"both"` — 服务器端下载 → 拉回本地（默认）
 
 利用服务器带宽直连 Steam CDN，避免本地网络瓶颈。
 
-**3a.** 上传下载脚本到服务器：
+**3a. 从配置读取 SSH 参数：**
+
+在后续 SCP/SSH 命令之前，先用 python3 内联读取配置中的服务器连接信息：
 
 ```bash
-scp -P <port> -i <ssh_key> download.py <user>@<host>:/tmp/download_map.py
+SRV_HOST=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['host'])")
+SRV_PORT=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('port',22))")
+SRV_USER=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('username','root'))")
+SRV_KEY=$(python3 -c "import json,os; print(os.path.expanduser(json.load(open('l4d2_config.json'))['server'].get('ssh_key_path','~/.ssh/id_ed25519')))")
 ```
 
-**3b.** 在服务器上执行下载（注意超时需覆盖大文件）：
+> 后续命令直接使用 `$SRV_HOST` `$SRV_PORT` `$SRV_USER` `$SRV_KEY` 变量。
+
+**3b.** 上传下载脚本到服务器：
 
 ```bash
-ssh -p <port> -i <ssh_key> <user>@<host> "cd /tmp && python3 download_map.py <ID1,ID2,...>" 2>&1
+scp -P "$SRV_PORT" -i "$SRV_KEY" download.py "$SRV_USER@$SRV_HOST":/tmp/download_map.py
+```
+
+**3c.** 在服务器上执行下载（注意超时需覆盖大文件）：
+
+```bash
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cd /tmp && python3 download_map.py <ID1,ID2,...>" 2>&1
 ```
 
 timeout 至少 600000ms。脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `/tmp/l4d2_temp_dl/vpk/` → .bin 改 .vpk。
 
-**3c.** 拉回 vpk 到本地：
+**3d.** 拉回 vpk 到本地：
 
 ```bash
 mkdir -p l4d2_temp_dl/vpk
-scp -P <port> -i <ssh_key> <user>@<host>:/tmp/l4d2_temp_dl/vpk/*.vpk l4d2_temp_dl/vpk/
+scp -P "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST":/tmp/l4d2_temp_dl/vpk/*.vpk l4d2_temp_dl/vpk/
 ```
 
 ### 模式 B: `"local_only"` — 本地下载
@@ -199,14 +226,12 @@ ls -lh l4d2_temp_dl/vpk/
 
 ## Step 5: 部署执行
 
-不使用 deploy.py，直接用 shell 命令完成。先从配置读取 SSH 参数和路径。
+直接用 shell 命令完成。
 
 ### 5a. 读取配置变量
 
-用 python3 一行内联读取配置，供后续 shell 命令使用。`local_addons_dir` 需做 Windows → WSL 路径转换（`E:\foo\bar` → `/mnt/e/foo/bar`）：
-
 ```bash
-# 读取本地路径（自动转换 Windows 盘符）
+# 本地路径（自动转换 Windows 盘符 E:\... → /mnt/e/...）
 LOCAL_DIR=$(python3 -c "
 import json, re
 cfg = json.load(open('l4d2_config.json'))
@@ -216,7 +241,7 @@ print(f'/mnt/{m.group(1).lower()}{m.group(2).replace(chr(92),chr(47))}' if m els
 ")
 ```
 
-若双端部署，同时读取远端参数：
+若双端部署，同时读取远端参数（注意 Bash 不共享变量，需重新读取）：
 
 ```bash
 SRV_HOST=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['host'])")
@@ -226,7 +251,7 @@ SRV_KEY=$(python3 -c "import json,os; print(os.path.expanduser(json.load(open('l
 REMOTE_DIR=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['remote_addons_dir'])")
 ```
 
-> 若 `REMOTE_DIR` 为 `"auto"`，需要先用 `ssh ... "find / -type d -path '*/left4dead2/addons' 2>/dev/null | head -n 1"` 自动探测。
+> 若 `REMOTE_DIR` 为 `"auto"`，需要先用 `ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "find / -type d -path '*/left4dead2/addons' 2>/dev/null | head -n 1"` 自动探测。
 
 ### 5b. 本地部署
 
@@ -258,21 +283,30 @@ echo "[远端] 已重启 l4d2 服务"
 使用 Bash 删除本地临时目录和服务器端残留文件：
 
 ```bash
-rm -rf l4d2_temp_dl && ssh -p <port> -i <ssh_key> <user>@<host> "rm -rf /tmp/l4d2_temp_dl /tmp/download_map.py"
+rm -rf l4d2_temp_dl && ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "rm -rf /tmp/l4d2_temp_dl /tmp/download_map.py"
 ```
 
 > 若 `local_only` 模式，只清理 `rm -rf l4d2_temp_dl`。
 
 输出摘要：
 
-```
-========== 部署完成 ==========
-下载项目:     <下载列表（主地图 + 依赖）>
-本地路径:     <local_addons_dir>
-远端主机:     <host>:<remote_addons_dir>
-远端服务:     已重启
-===============================
-```
+- **双端部署：**
+  ```
+  ========== 部署完成 ==========
+  下载项目:     <下载列表（主地图 + 依赖）>
+  本地路径:     <local_addons_dir>
+  远端主机:     <host>:<remote_addons_dir>
+  远端服务:     已重启
+  ===============================
+  ```
+
+- **仅本地：**
+  ```
+  ========== 部署完成 ==========
+  下载项目:     <下载列表（主地图 + 依赖）>
+  本地路径:     <local_addons_dir>
+  ===============================
+  ```
 
 ---
 
