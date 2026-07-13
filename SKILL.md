@@ -46,8 +46,8 @@ cd ~/.claude/skills/l4d2-map-deployer
 - header: 「本地addons路径」
 - question: 「请输入 Windows 端 left4dead2/addons 的绝对路径」
 - options:
-  - `{label: "默认路径 (推荐)", description: "E:\\SteamLibrary\\steamapps\\common\\Left 4 Dead 2\\left4dead2\\addons"}`
-  - `{label: "自定义路径", description: "手动输入其他路径"}`
+  - `{"label": "默认路径 (推荐)", "description": "E:\\SteamLibrary\\steamapps\\common\\Left 4 Dead 2\\left4dead2\\addons"}`
+  - `{"label": "自定义路径", "description": "手动输入其他路径"}`
 
 收集后，使用 Write 写入 `l4d2_config.json`。**注意：需用 json.dumps 序列化以确保反斜杠正确转义**，格式如下：
 
@@ -280,9 +280,13 @@ echo "[远端] 已重启 l4d2 服务"
 
 ## Step 6: 收尾清理
 
-使用 Bash 删除本地临时目录和服务器端残留文件：
+使用 Bash 删除本地临时目录和服务器端残留文件。**注意：若与 Step 5 分开调用，SSH 变量会丢失，需先重新读取：**
 
 ```bash
+SRV_HOST=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server']['host'])")
+SRV_PORT=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('port',22))")
+SRV_USER=$(python3 -c "import json; print(json.load(open('l4d2_config.json'))['server'].get('username','root'))")
+SRV_KEY=$(python3 -c "import json,os; print(os.path.expanduser(json.load(open('l4d2_config.json'))['server'].get('ssh_key_path','~/.ssh/id_ed25519')))")
 rm -rf l4d2_temp_dl && ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "rm -rf /tmp/l4d2_temp_dl /tmp/download_map.py"
 ```
 
