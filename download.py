@@ -1,7 +1,19 @@
-import json, os, sys, urllib.parse, urllib.request
+import json, os, re, sys, urllib.parse, urllib.request
 
-ids_str = sys.argv[1] if len(sys.argv) > 1 else sys.exit("用法: python3 download.py <ID1,ID2,...>")
+ids_str = sys.argv[1] if len(sys.argv) > 1 else sys.exit("用法: python3 download.py <ID1,ID2,...> [地图名]")
 ids = [x.strip() for x in ids_str.split(",") if x.strip()]
+query = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+
+
+def out_name(label, wid, orig):
+    """<地图名>_<工坊ID>.vpk —— 远端与本地同名，便于辨认与清理"""
+    ext = os.path.splitext(orig)[1].lower()
+    if ext in ("", ".bin"):
+        ext = ".vpk"
+    label = re.sub(r'[\\/:*?"<>|]', "_", label)  # Windows 非法字符
+    label = re.sub(r"\s+", "_", label)
+    label = re.sub(r"_+", "_", label).strip("._")
+    return f"{label}_{wid}{ext}" if label and label != wid else f"{wid}{ext}"
 
 # ── 调用 API 获取每个 ID 的下载信息 ──
 api_params = {"itemcount": str(len(ids))}
@@ -30,7 +42,6 @@ for wid in ids:
         continue
 
     file_url = d.get("file_url", "")
-    filename = d.get("filename", "")
     title = d.get("title", wid)
     size = int(d.get("file_size", 0))
 
@@ -43,17 +54,8 @@ for wid in ids:
         print(f"  [跳过] {title} — 文件过小 ({size}B)")
         continue
 
-    # 确定输出文件名：非 vpk/bin 的保留原始扩展名（如预览图）
-    name = os.path.basename(filename)
-    if name.endswith(".bin"):
-        name = name[:-4] + ".vpk"
-    elif not name.endswith(".vpk"):
-        # 预览图等，保留原名
-        pass
-    if name.endswith(".bin"):
-        name = name[:-4] + ".vpk"
-    if not name.endswith(".vpk"):
-        name = name + ".vpk"
+    # 确定输出文件名：主地图与依赖统一用 query 前缀，未提供 query 时退回 Steam 标题
+    name = out_name(query or title, wid, os.path.basename(d.get("filename", "")))
     out_path = os.path.join(base, name)
 
     # 检查是否已存在

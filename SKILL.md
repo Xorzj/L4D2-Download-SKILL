@@ -149,6 +149,8 @@ cd ~/.claude/skills/l4d2-map-deployer
 
 通过 Steam Web API 匿名获取 CDN 下载链接。`download.py` 只用 Python 标准库。
 
+**命名规则**：下载后一律重命名为 `<查询名>_<工坊ID>.vpk`——主地图与依赖统一使用 Step 1 的用户 query 作为前缀，同一张地图及其依赖因此共享同一前缀，按文件名排序即可归组。远端与本地同名，便于日后按前缀整组清理。名称中的空白和 Windows 非法字符（`\ / : * ? " < > |`）会被替换为下划线。
+
 **首先使用 Read 检查 `l4d2_config.json` 的 `deploy_mode`，然后按模式分流：**
 
 ### 模式 A: `"both"` — 服务器端下载 → 拉回本地（默认）
@@ -177,10 +179,12 @@ scp -P "$SRV_PORT" -i "$SRV_KEY" download.py "$SRV_USER@$SRV_HOST":/tmp/download
 **3c.** 在服务器上执行下载（注意超时需覆盖大文件）：
 
 ```bash
-ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cd /tmp && python3 download_map.py <ID1,ID2,...>" 2>&1
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cd /tmp && python3 download_map.py <下载列表> '<查询名>'" 2>&1
 ```
 
-timeout 至少 600000ms。脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `/tmp/l4d2_temp_dl/vpk/` → .bin 改 .vpk。
+timeout 至少 600000ms。脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `/tmp/l4d2_temp_dl/vpk/` → 按命名规则重命名。
+
+> `<查询名>` 必填，作为所有文件（主地图 + 依赖）的统一前缀。query 用单引号包裹；若 query 自身含单引号，写成 `'\''`。
 
 **3d.** 拉回 vpk 到本地：
 
@@ -194,10 +198,10 @@ scp -P "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST":/tmp/l4d2_temp_dl/vpk/*.v
 无服务器时使用，直接在本地拉取 Steam CDN：
 
 ```bash
-python3 download.py "<ID1,ID2,...>"
+python3 download.py "<下载列表>" "<查询名>"
 ```
 
-下载到 `l4d2_temp_dl/vpk/` → .bin 改 .vpk，预览图保留原名。
+下载到 `l4d2_temp_dl/vpk/`，按命名规则重命名。
 
 ---
 
