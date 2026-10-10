@@ -19,7 +19,31 @@ except Exception as e:
     sys.exit(f"[错误] 请求失败: {e}")
 
 
-# ── 路径 1: 从 React SSR window.SSR.renderContext 提取 ──
+# ── 路径 0: 从 <script type="application/json" id="...-data"> 提取（新版页面） ──
+def extract_from_ssr_json(html):
+    m = re.search(r'<script[^>]*type="application/json"[^>]*id="[^"]*-data"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return []
+    try:
+        payload = json.loads(m.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    rc = payload.get("renderContext")
+    if not isinstance(rc, dict):
+        return []
+    query_data = rc.get("queryData")
+    if isinstance(query_data, str):
+        try:
+            query_data = json.loads(query_data)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(query_data, dict):
+        return []
+    return items_from_queries(query_data.get("queries", []))
+
+
+# ── 路径 1: 从 React SSR window.SSR.renderContext 提取（旧版页面） ──
 def extract_from_ssr(html):
     # window.SSR.renderContext=JSON.parse("{...}");
     # 外层 JSON 含 queryData 字段（本身是 JSON 字符串），需三重解码
@@ -41,7 +65,10 @@ def extract_from_ssr(html):
     except (json.JSONDecodeError, TypeError):
         return []
 
-    queries = query_data.get("queries", [])
+    return items_from_queries(query_data.get("queries", []))
+
+
+def items_from_queries(queries):
     results = None
     for q in queries:
         qk = q.get("queryKey", [])
@@ -174,8 +201,10 @@ def format_output(items, query):
         print()
 
 
-# ── 主流程: SSR 优先, Legacy 兜底 ──
-items = extract_from_ssr(html)
+# ── 主流程: SSR JSON 优先, 旧 SSR 次之, Legacy 兜底 ──
+items = extract_from_ssr_json(html)
+if not items:
+    items = extract_from_ssr(html)
 if not items:
     items = extract_from_legacy(html)
 
