@@ -12,11 +12,7 @@ allowed-tools:
 
 运行环境为 WSL2。用户输入即为要搜索的地图名称。
 
-**启动时首先切换工作目录：**
-
-```bash
-cd ~/.claude/skills/l4d2-map-deployer
-```
+**启动时切换到当前读取的 `SKILL.md` 所在目录。** Codex 与 Claude 的安装目录可能不同，使用这份说明同目录下的脚本和配置，不要跳到另一份技能目录。
 
 所有后续操作均在此目录下执行。全部脚本只用 Python 标准库，直接用 `python3` 运行。无 uv、无 Docker、无 steamcmd。
 
@@ -149,7 +145,15 @@ cd ~/.claude/skills/l4d2-map-deployer
 
 通过 Steam Web API 匿名获取 CDN 下载链接。`download.py` 只用 Python 标准库。
 
-**命名规则**：下载后一律重命名为 `<查询名>_<工坊ID>.vpk`——主地图与依赖统一使用 Step 1 的用户 query 作为前缀，同一张地图及其依赖因此共享同一前缀，按文件名排序即可归组。远端与本地同名，便于日后按前缀整组清理。名称中的空白和 Windows 非法字符（`\ / : * ? " < > |`）会被替换为下划线。
+**命名规则**：VPK 命名为 `<查询名>_<工坊ID>.vpk`——主地图与依赖统一使用 Step 1 的用户 query 作为前缀，同一张地图及其依赖因此共享同一前缀，按文件名排序即可归组。远端与本地同名，便于日后按前缀整组清理。名称中的空白和 Windows 非法字符（`\ / : * ? " < > |`）会被替换为下划线。
+
+下载器默认以 **4 条连接、每段 8MB** 下载同一文件；文件之间依次处理，避免并发数随依赖数量增长。仅使用 Python 标准库。
+
+- 分段保存到 `<文件名>.vpk.parts/`，每段重试从已有字节继续，原版遗留的半成品 VPK 也会先导入分段续传。
+- 单连接连续 20 秒低于 512KB/s 时重建连接；读取超时默认 15 秒，每段最多尝试 8 次。实际低带宽可用 `--min-speed 0` 关闭低速检测。
+- 校验 HTTP 206、Content-Range 和分段大小，全部完成后原子合并成 `.vpk`。CDN 忽略 Range 时自动退回单连接，该情况下中断重试从头开始。
+- `--workers 8` 可提高连接数；调整连接数不影响已有断点。续传时保持 `--chunk-size` 不变；URL、文件大小或分段配置不一致时保留断点并报错，避免混合文件版本。
+- API 标明为 `.png`、`.jpg` 等非 VPK 的依赖会明确记录为跳过，不下载、不部署；空扩展名或 `.bin` 继续按原有 VPK 规则处理。
 
 **首先使用 Read 检查 `l4d2_config.json` 的 `deploy_mode`，然后按模式分流：**
 
@@ -176,15 +180,24 @@ SRV_KEY=$(python3 -c "import json,os; print(os.path.expanduser(json.load(open('l
 scp -P "$SRV_PORT" -i "$SRV_KEY" download.py "$SRV_USER@$SRV_HOST":/tmp/download_map.py
 ```
 
-**3c.** 在服务器上执行下载（注意超时需覆盖大文件）：
+**3c.** 使用脚本自带的后台模式启动（与远端默认 shell 无关，fish 也可执行）：
 
 ```bash
-ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cd /tmp && python3 download_map.py <下载列表> '<查询名>'" 2>&1
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "python3 /tmp/download_map.py '<下载列表>' '<查询名>' --workers 4 --background"
 ```
 
-timeout 至少 600000ms。脚本自动：调用 API 获取 file_url → 跳过空壳 → 下载到 `/tmp/l4d2_temp_dl/vpk/` → 按命名规则重命名。
+`--background` 将子进程放入独立会话，断开标准输入，输出写到 `/tmp/l4d2_temp_dl/download.log`，返回后台 PID。启动返回 0 仅表示启动已确认，**不能当作下载成功**。重复启动同一输出目录会被文件锁拒绝，且不会覆盖原任务状态。
 
-> `<查询名>` 必填，作为所有文件（主地图 + 依赖）的统一前缀。query 用单引号包裹；若 query 自身含单引号，写成 `'\''`。
+定期查询日志及状态；每次间隔约 10–30 秒，无需保持一个长 SSH 会话：
+
+```bash
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "tail -n 20 /tmp/l4d2_temp_dl/download.log"
+ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "cat /tmp/l4d2_temp_dl/status.json"
+```
+
+状态文件的 `pid` 必须与此次启动返回的 PID 对应：`running` 继续等待，`completed` 才进入下一步，`failed` 查看日志并保留断点。SSH 返回 255 时先重新查询状态；这只代表连接失败，不能直接推断远端下载进程已停止。状态长时间停在 running 时，通过 `ps -p <PID> -o pid=,etimes=,args=` 核实是否仍在运行；确认退出后才续传重启。不要盲目启动第二份任务或清理目录。
+
+> `<查询名>` 必填。上例为本地 Bash 命令，查询名进入远端命令前须安全引用；复杂名称建议用本地 Python 的 `shlex.quote()` 生成远端每个参数，再以 `subprocess.run(["ssh", ..., remote_command])` 调用，避免手工嵌套引号。不要在默认 fish 中执行 Bash 的 `S1=$(...)`。需要 Bash 语法时显式调用 `bash -lc`，或用单次远端 Python 完成检测。
 
 **3d.** 拉回 vpk 到本地：
 
@@ -198,7 +211,7 @@ scp -P "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST":/tmp/l4d2_temp_dl/vpk/*.v
 无服务器时使用，直接在本地拉取 Steam CDN：
 
 ```bash
-python3 download.py "<下载列表>" "<查询名>"
+python3 download.py "<下载列表>" "<查询名>" --workers 4
 ```
 
 下载到 `l4d2_temp_dl/vpk/`，按命名规则重命名。
@@ -207,7 +220,7 @@ python3 download.py "<下载列表>" "<查询名>"
 
 ## Step 4: 验证产物
 
-使用 Bash 确认 vpk 文件已就位：
+先确认 `l4d2_temp_dl/status.json` 的 `state` 为 `completed`，并按其 `files` 清单核对本次 VPK 已就位。若临时目录残留历史文件，后续 SCP/CP 改为逐个指定 `files` 中的文件名，避免通配符混入旧图。`.vpk.parts/` 仅为断点，不能部署：
 
 ```bash
 ls -lh l4d2_temp_dl/vpk/
@@ -321,10 +334,13 @@ rm -rf l4d2_temp_dl && ssh -p "$SRV_PORT" -i "$SRV_KEY" "$SRV_USER@$SRV_HOST" "r
 ## 异常处理
 
 - Step 1 Steam 不可达 → 提示检查网络/代理，终止
-- Step 3 服务器下载失败 → 提示检查服务器网络/Steam CDN 连通性，终止
+- Step 3 下载持续低速 → 脚本自动按分段重连；耗尽重试时保留断点，核实任务已退出后重新执行相同命令续传
+- Step 3 SSH 断连/返回 255 → 重连查询远端 PID、状态和日志，不能直接判定后台下载失败
+- Step 3 服务器下载状态为 failed → 检查日志和网络，保留分段，不进入部署
 - Step 3 SCP 拉回失败 → 提示检查 SSH 连接，终止
-- Step 3 本地下载失败 → 提示检查网络，CDN 可能限制并发，逐个重试，终止
+- Step 3 本地下载失败 → 保留分段并检查日志；可降低 `--workers` 重试，或用 `--min-speed 0` 适应低带宽
 - Step 4 无 vpk → 提示下载异常，保留 `l4d2_temp_dl` 供排查，终止
 - Step 5 SSH 失败 → 提示检查 IP/端口/防火墙/凭据，终止
 - Step 5 auto 搜索失败 → 提示手动填写 `remote_addons_dir`，终止
-- 任何步骤失败立即终止，不执行后续步骤
+- 下载未确认完成时不执行部署/重启/清理；普通 SSH 断连可继续只读查询远端状态
+- 成功部署后才按 Step 6 清理；失败时保留日志、状态文件和分段以便恢复

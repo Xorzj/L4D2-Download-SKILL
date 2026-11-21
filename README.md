@@ -51,6 +51,22 @@ cp l4d2_config.example.json l4d2_config.json
 
 或直接描述地图名即可触发。
 
+## 并发下载
+
+```bash
+python3 download.py "ID1,ID2" "地图名" --workers 4
+# 服务器上脱离 SSH 会话运行；返回 PID 后查询日志和状态
+python3 download.py "ID1,ID2" "地图名" --workers 4 --background
+cat l4d2_temp_dl/status.json
+tail -n 20 l4d2_temp_dl/download.log
+```
+
+默认单文件 4 路连接、每段 8MB，文件之间串行。分段断流后自动续传，低于 512KB/s 持续 20 秒时重连，每段最多尝试 8 次；`--min-speed 0` 可禁用低速检测。CDN 不支持 Range 时退回单连接，重试从头开始。`--workers` 可以调整，续传时保持 `--chunk-size` 不变。
+
+支持导入旧版未完成的 VPK；新断点位于 `vpk/<文件名>.vpk.parts/`，合并完成后才生成可部署的 VPK。非 VPK 依赖（如 PNG）明确跳过。失败时保留断点，重新执行相同命令恢复。
+
+后台启动成功仅代表任务已启动，状态文件 PID 必须对应本次任务且 `state` 为 `completed` 才能部署；SSH 断线后重新读取状态，不要重复启动。同一输出目录由文件锁保护。仅部署状态 `files` 清单中的本次文件。
+
 ## 依赖
 
 - Python 3.x（仅标准库）
